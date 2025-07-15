@@ -1,0 +1,62 @@
+environ:
+  seed: 42
+  device: "cuda"
+  output_dir: "./outputs/coco_vis"
+data:
+  dataset: "coco"
+  dataset_root: "./dataset/coco"
+  json_file: "./dataset/coco/annotations/instances_val2017.json"
+  train_file: "./dataset/coco/annotations/instances_train2017.json"
+  odgt_file: ""
+model:
+  dino_repo: "./dinov2"
+  dino_checkpoint: "./weights/dinov2_vitl14_pretrain.pth"
+  dino_model: "dinov2_vitl14"
+  sam_checkpoint: "./weights/sam_vit_l_0b3195.pth"
+  sam_model: "vit_l"
+  sam_arch: "crowdsam"
+  sam_adapter_checkpoint: "./adapter_weights/coco_adapter.pth"
+  n_class: 80
+  max_size: 1024
+  trainfree: False
+train:
+  default: 0
+  n_shot: 250
+  seed: 1
+  samples_per_batch: 30
+  neg_samples_per_batch: 60
+  steps: 2500
+  lr: 0.0001
+  optimizer: "adamw"
+  weight_decay: 0.0001
+  save_path: "adapter_weights/coco_adapter.pth"
+test:
+  output_rles: True
+  #cropping 
+  crop_n_layers: 0
+  crop_nms_thresh: 0.7
+  crop_overlap_ratio: 0.341 #512/1500
+
+  #forward options
+  pos_sim_thresh: 0.5
+  apply_box_offsets: False
+  grid_size: 192
+
+  #eps
+  max_prompts: 500
+  filter_thresh: 0.7
+  points_per_batch: 32
+  mask_selection: "max_iou"
+  max_size: 1024
+
+  #post processing
+  fuse_simmap: False
+  min_mask_region_area: 100
+  box_nms_thresh: 0.65
+  stability_score_thresh: 0.8
+  stability_score_offset: 1
+  pred_iou_thresh: 0.1
+
+vis:
+  vis_thresh: 0.3
+

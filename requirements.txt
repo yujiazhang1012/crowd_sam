@@ -1,0 +1,10 @@
+pyyaml
+torchvision
+torch>=1.8.0
+tqdm
+numpy
+loguru
+opencv-python
+matplotlib
+xformer
+tabulate
