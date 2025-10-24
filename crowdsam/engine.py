@@ -158,6 +158,9 @@ def predict_torch(
     )
     #B,C,H,W -> B,H,W,C for MLP to process
 
+    action_logits = self.model.mask_decoder.action_head(sparse_embeddings.mean(dim=1))
+
+    # 增加动作输出类别
     return low_res_masks, iou_predictions, categories
 def train_loop(data_loader,  predictor, optimizer, max_steps=3000, n_shot=10, instance_num=20, neg_instance_num= 40, class_num =1, loss_type='coco', debug=False, use_cache=True):
     #sample num: total data used for training

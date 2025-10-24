@@ -25,7 +25,7 @@ class MaskDecoder(nn.Module):
         activation: Type[nn.Module] = nn.GELU,
         iou_head_depth: int = 3,
         iou_head_hidden_dim: int = 256,
-        n_class = 1,
+        n_class = 7, # 7类动作
     ) -> None:
         """
         Predicts masks given an image and prompt embeddings, using a
@@ -52,6 +52,15 @@ class MaskDecoder(nn.Module):
         self.iou_token = nn.Embedding(1, transformer_dim)
         self.num_mask_tokens = num_multimask_outputs + 1
         self.mask_tokens = nn.Embedding(self.num_mask_tokens, transformer_dim)
+
+
+        # 增加分类头
+        self.action_head = nn.Sequential(
+            nn.Linear(transformer_dim, 256),
+            nn.ReLU(),
+            nn.Dropout(0.5),
+            nn.Linear(256, 6)  # 6类动作
+        )
 
         self.output_upscaling = nn.Sequential(
             nn.ConvTranspose2d(transformer_dim, transformer_dim // 4, kernel_size=2, stride=2),

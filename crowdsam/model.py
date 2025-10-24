@@ -143,9 +143,32 @@ class CrowdSAM():
              scores: >0
              masks: only exists when visualize is enabled
         """
+
+        
         # Generate masks
         mask_data = self._generate_masks(image)
         # Filter small disconnected regions and holes in masks
+
+        # 增加
+        # 对每个 mask 输出动作类别
+        if len(mask_data['masks']) > 0:
+            masks = mask_data['masks']
+            actions = []
+            tight_boxes = []
+
+            for mask in masks:
+                # 提取 mask 特征（可选）
+                # 使用 mask decoder 的中间特征进行分类
+                action_id, action_name, conf = self.classify_roi_from_mask(image, mask)
+                actions.append({
+                    'action_id': action_id,
+                    'action_name': action_name,
+                    'confidence': conf
+                })
+                tight_boxes.append(tight_box)
+
+            mask_data['boxes'] = torch.tensor(tight_boxes, dtype=torch.float32)
+            mask_data['actions'] = actions
         return mask_data
 
     def _generate_masks(self, image):

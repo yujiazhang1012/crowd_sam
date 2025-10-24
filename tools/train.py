@@ -10,6 +10,8 @@ import torchvision.transforms as T
 
 import numpy as np
 import sys
+sys.path.append("/home/ccnu-train/zyj/crowd_sam/crowd_sam")
+
 # from utils import draw_mask,draw_point,draw_box
 from segment_anything_cs import sam_model_registry, SamPredictor
 from loguru import logger

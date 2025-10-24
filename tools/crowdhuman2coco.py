@@ -16,13 +16,13 @@ def make_parser():
     )
     parser.add_argument(
         "-o", "--odgt-path",
-        default='annotation_val.odgt',
+        default='annotation_train.odgt',
         type=str,
         help="the path of CrowdHuman odgt file"
     )
     parser.add_argument(
         "-s", "--save-path",
-        default='val.json',
+        default='train.json',
         type=str,
         help='the path to save json file'
     )

@@ -5,9 +5,9 @@ environ:
 data:
   dataset: "crowdhuman"
   dataset_root: "./dataset/crowdhuman"
-  json_file: "./dataset/crowdhuman/val_visible.json"
-  train_file: "./crowdhuman_train/train_crowdhuman_10shot.json"
-  odgt_file: "./dataset/crowdhuman/annotation_val.odgt"
+  json_file: "./dataset/crowdhuman/annotations/val.json"
+  train_file: "./dataset/crowdhuman/annotations/train.json"
+  odgt_file: "./dataset/crowdhuman/annotations/annotations_val.odgt"
 model:
   dino_repo: "./dinov2"
   dino_checkpoint: "./weights/dinov2_vitl14_pretrain.pth"

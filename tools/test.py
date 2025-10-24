@@ -3,8 +3,10 @@ import os
 import sys
 import json
 from tqdm import tqdm
+# import tqdm
 import numpy as np
 import torch
+sys.path.append("/home/ccnu-train/zyj/crowd_sam/crowd_sam")
 from crowdsam.model import CrowdSAM
 from crowdsam.data import data_meta
 from crowdsam.utils import (load_img_and_annotation, setup_logger, load_config, modify_config,
@@ -18,12 +20,13 @@ def envrion_init():
     parser.add_argument('--end_idx',type=int, default=-1) # -1 represents using all images
     parser.add_argument('-c','--config_file', type=str, default='./configs/crowdhuman.yaml')
     parser.add_argument('-v','--visualize',help='visualize the outputs', action="store_true")
+    
     parser.add_argument('-s','--save_path',help='the path to dump json result', type=str, default="")
     parser.add_argument('-r','--local_rank', type=int, default=0)
     parser.add_argument('options',nargs=argparse.REMAINDER)
     # parser.add_argument('--dataset',type=str, default="crowdhuman")
     args = parser.parse_args()
-
+    args.visualize = True
     configs = load_config(args.config_file)
     configs = modify_config(configs, args.options)
     np.random.seed(configs['environ']['seed'])
@@ -46,6 +49,9 @@ if __name__ == '__main__':
         config['environ']['device'] =  f'cuda:{args.local_rank}'
     #===========>configure model
     model = CrowdSAM(config, logger)
+    # 加载训练权重
+    
+
     # annot_path = os.path.join(dataset_path[args.dataset], args.label_file)
     annot_path = config['data']['json_file']
     #===========> A simple data loading strategy that can be replaced with a DDP dataloader in the future update.
