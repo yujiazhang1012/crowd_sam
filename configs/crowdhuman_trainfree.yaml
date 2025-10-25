@@ -15,7 +15,7 @@ model:
   sam_model: "vit_l"
   sam_arch: 'sam'
   sam_adapter_checkpoint: "./sam_adapter_weights/10_shot.pth"
-  n_class: 1
+  n_class: 7
   max_size: 1024
   # training-free version
   trainfree: True

@@ -4,8 +4,12 @@ import os
 from pycocotools.coco import COCO
 from PIL import Image
 from .coco_names import coco_classes
-data_meta = {'crowdhuman':["./datasets/crowdhuman", 1, {1:'person'}],
-             'occhuman':["./datasets/OCHuman", 1, {1:'person'}],
+data_meta = {'crowdhuman': ["./datasets/crowdhuman", 7,
+                   {1: 'write', 2: 'read', 3: 'lookup', 4: 'turn_head',
+                    5: 'raise_hand', 6: 'stand', 7: 'discuss'}],
+             'occhuman': ["./datasets/OCHuman", 7,
+                   {1: 'write', 2: 'read', 3: 'lookup', 4: 'turn_head',
+                    5: 'raise_hand', 6: 'stand', 7: 'discuss'}],
              'coco_occ':["./datasets/coco", 80, coco_classes],
              'coco':["./datasets/occ_coco", 80, coco_classes], 
              }
@@ -71,35 +75,53 @@ class COCODataset(torch.utils.data.Dataset):
         return sample
 
 class CrowdHuman(torch.utils.data.Dataset):
-    def __init__(self, dataset_root, annot_path, transform):
+    def __init__(self, dataset_root, annot_path, transform, use_sam_masks=True):
+        super().__init__()
         self.dataset_root = dataset_root
         self.transform = transform
         img_dir = 'Images'        
-        annots = json.load(open( annot_path))
+        with open(annot_path, 'r') as f:
+            annots = json.load(f)
         annotations = annots['annotations']
         images = annots['images']
         self.image_ids = [img['id'] for img in images]
-        self.boxes = {}
+        self.image_files = [
+            os.path.join(dataset_root, img_dir, img['file_name'])
+            for img in images
+        ]
+        # 创建 image_id -> file_path 映射
+        image_id_to_path = {
+            img['id']: os.path.join(dataset_root, img_dir, img['file_name'])
+            for img in images
+        }
+        self.samples = []
         for annot in annotations:
             image_id = int(annot['image_id'])
-            if image_id not in self.boxes.keys():
-                self.boxes[image_id] = []
-            self.boxes[image_id].append(annot['bbox'])
-        
-        self.image_files = [os.path.join(dataset_root, img_dir,img['file_name']) for img in images]    
+            if image_id in image_id_to_path:
+                image_path = image_id_to_path[image_id]
+                bbox = annot['bbox']
+                label = annot['category_id'] - 1  # 转为 0~6
+                self.samples.append((image_path, bbox, label))
     def __getitem__(self, item):
-        img = Image.open(self.image_files[item])
-        w,h = img.size
-        boxes = torch.tensor(self.boxes[item])
-        boxes = boxes / torch.tensor([w,h,w,h]).unsqueeze(0)
-        boxes[:, 2:] = boxes[:, :2] + boxes[:, 2:]
-        return img, boxes
+        image_path, bbox, label = self.samples[item]
+        img = Image.open(image_path).convert('RGB')
+        x, y, w, h = bbox
+        roi = img.crop((x, y, x + w, y + h))
+        
+        if self.transform:
+            roi = self.transform(roi)
+        
+        geo_features = torch.zeros(8)
+        return roi, label, geo_features
     def __len__(self):
         return len(self.image_files)
     
 def collate_fn_crowdhuman(data):
-    images, boxes= zip(*data)
-    return images, boxes
+    rois, labels, geo_features = zip(*data)
+    rois = torch.stack(rois, dim=0)
+    labels = torch.tensor(labels, dtype=torch.long)
+    geo_features = torch.stack(geo_features, dim=0)
+    return rois, labels, geo_features
 
 def collate_fn_coco(data):
     images = [d['image'] for d in  data]

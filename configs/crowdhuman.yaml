@@ -5,9 +5,9 @@ environ:
 data:
   dataset: "crowdhuman"
   dataset_root: "./dataset/crowdhuman"
-  json_file: "./dataset/crowdhuman/annotations/val.json"
-  train_file: "./dataset/crowdhuman/annotations/train.json"
-  odgt_file: "./dataset/crowdhuman/annotations/annotations_val.odgt"
+  json_file: "./dataset/crowdhuman/annotations/annotation_val.json"
+  train_file: "./dataset/crowdhuman/annotations/annotation_train.json"
+  odgt_file: "./dataset/crowdhuman/annotations/annotation_val.odgt"
 model:
   dino_repo: "./dinov2"
   dino_checkpoint: "./weights/dinov2_vitl14_pretrain.pth"
@@ -34,7 +34,7 @@ train:
 test:
   output_rles: True
   #cropping 
-  crop_n_layers: 0
+  crop_n_layers: 1
   crop_nms_thresh: 0.7
   crop_overlap_ratio: 0.341 #512/1500
 
@@ -52,9 +52,9 @@ test:
 
   #post processing
   fuse_simmap: False
-  min_mask_region_area: 100
+  min_mask_region_area: 0
   box_nms_thresh: 0.65
-  stability_score_thresh: 0.8
+  stability_score_thresh: 0.3
   stability_score_offset: 1
   pred_iou_thresh: 0.1
 

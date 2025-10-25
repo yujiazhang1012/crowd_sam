@@ -25,7 +25,7 @@ class MaskDecoderHQ(nn.Module):
         iou_head_depth: int = 3,
         iou_head_hidden_dim: int = 256,
         vit_dim: int = 1024,
-        n_class=1,
+        n_class=7,
     ) -> None:
         """
         Predicts masks given an image and prompt embeddings, using a

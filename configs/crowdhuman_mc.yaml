@@ -14,7 +14,7 @@ model:
   sam_checkpoint: '../segment-anything/sam_vit_l_0b3195.pth'
   sam_model: "adaptvit_l"
   sam_adapter_checkpoint: "./sam_adapter_weights/10_shot.pth"
-  n_class: 1
+  n_class: 7
   max_size: 1024
 train:
   default: 0
