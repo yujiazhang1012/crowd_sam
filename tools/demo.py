@@ -42,7 +42,7 @@ if __name__ == '__main__':
         image_files = [args.input]
     else:
         image_files =  glob.glob(os.path.expanduser(args.input))
-    #===========>run in loop and collect result
+    
     output_content = []
     logger.info(f'total images  to process { len(image_files)}')
     # 获取当前时间

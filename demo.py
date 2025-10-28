@@ -33,9 +33,13 @@ def visualize_results(image, mask_data, action_classes):
         image_bgr = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
     else:
         image_bgr = image.copy()
+
+    # 安全检查：使用hasattr 或直接访问
+    has_actions = hasattr(mask_data, '_stats') and 'actions' in mask_data._stats
     
     # 绘制每个检测结果
-    if 'actions' in mask_data and len(mask_data['actions']) > 0:
+    # if 'actions' in mask_data and len(mask_data['actions']) > 0:
+    if has_actions and len(mask_data['boxes']) > 0:
         boxes = mask_data['boxes'].numpy() if hasattr(mask_data['boxes'], 'numpy') else mask_data['boxes']
         actions = mask_data['actions']
         
@@ -60,7 +64,6 @@ def visualize_results(image, mask_data, action_classes):
 
 
 def main():
-    # ====== 修改这里：设置你的文件路径 ======
     CONFIG_PATH = "configs/crowdhuman.yaml"        # 配置文件路径
     IMAGE_PATH = "dataset/crowdhuman/Images/05.jpg"       # 输入图像路径
     OUTPUT_PATH = "demo_output.jpg"                # 输出图像路径
@@ -75,6 +78,9 @@ def main():
     print("Loading CrowdSAM model...")
     model = CrowdSAM(config, logger=None)
     model.eval()
+
+
+
     
     # 加载动作识别头权重（如果存在）
     if os.path.exists(ACTION_HEAD_PATH):

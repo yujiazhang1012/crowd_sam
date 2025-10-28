@@ -5,7 +5,7 @@ import torchvision.transforms as T
 import torch.nn.functional as F
 import os
 import cv2
-
+import torch.nn.functional as F
 from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 from PIL import Image
@@ -44,7 +44,8 @@ class CrowdSAM(nn.Module):
                                             config['model']['sam_checkpoint'], 
                                             config['model']['sam_adapter_checkpoint'],
                                             dino_model, 
-                                            config['model']['n_class'])
+                                            config['model']['n_class'],
+                                            )
 
         # 增加
         self.action_classes = ["write", "read", "lookup", "turn_head", "raise_hand", "stand","discuss"]
@@ -64,7 +65,7 @@ class CrowdSAM(nn.Module):
             nn.Linear(256, self.num_action_classes)
         ).to(self.device)
         # 加载训练好的权重（如果有）
-        action_head_path = "weights/action_head.pth"
+        action_head_path = "weights/action_head_1.pth"
         if os.path.exists(action_head_path):
             self.action_head.load_state_dict(torch.load(action_head_path, map_location=self.device))
 
@@ -154,7 +155,7 @@ class CrowdSAM(nn.Module):
         mask_bool = mask_np.astype(bool)
         ys, xs = np.where(mask_bool)
         if len(ys) == 0:
-                return 0, "unknown", 0.0
+                return 0, "unknown", 0.0, [0, 0, 0, 0]
 
             # 计算 tight bbox
         x1_mask, x2_mask = xs.min(), xs.max()
@@ -176,7 +177,7 @@ class CrowdSAM(nn.Module):
         total_area = h_img * w_img
         area_ratio = area / total_area
         if area_ratio < 0.003 or area_ratio > 0.15:
-                return 0, "unknown", 0.0
+                return 0, "unknown", 0.0, [0, 0, 0, 0]
 
             # 裁剪 ROI
         margin_w = int((x2_orig - x1_orig) * 0.1)
@@ -187,7 +188,7 @@ class CrowdSAM(nn.Module):
         y2_crop = min(h_img, y2_orig + margin_h)
         roi = image[y1_crop:y2_crop, x1_crop:x2_crop]
         if roi.size == 0:
-                return 0, "unknown", 0.0
+                return 0, "unknown", 0.0, [0, 0, 0, 0]
 
         ## 图像预处理
         roi_pil = Image.fromarray(roi).convert('RGB')
@@ -206,7 +207,9 @@ class CrowdSAM(nn.Module):
 
         action_id = pred.item()
         confidence = conf.item()
+
         action_name = self.action_classes[action_id]
+
         return action_id, action_name, confidence, tight_box
         
     
@@ -255,7 +258,7 @@ class CrowdSAM(nn.Module):
             for mask in masks:
                 # 提取 mask 特征（可选）
                 # 使用 mask decoder 的中间特征进行分类
-                action_id, action_name, conf = self.classify_roi_from_mask(image, mask)
+                action_id, action_name, conf, tight_box = self.classify_roi_from_mask(image, mask)
                 actions.append({
                     'action_id': action_id,
                     'action_name': action_name,
@@ -265,6 +268,9 @@ class CrowdSAM(nn.Module):
 
             mask_data['boxes'] = torch.tensor(tight_boxes, dtype=torch.float32)
             mask_data['actions'] = actions
+        else:
+            mask_data['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+            mask_data['actions'] = []
         return mask_data
 
     def _generate_masks(self, image):
@@ -294,7 +300,22 @@ class CrowdSAM(nn.Module):
             
             if 'masks' in crop_data._stats and len(crop_data['masks']) > 0:
                 print(f"  ✅ Crop {i+1} generated {len(crop_data['masks'])} masks")
+
+                # 调试
+                before_cat_masks = len(data['masks']) if 'masks' in data._stats else 0
+                before_cat_keys = list(data._stats.keys())
+                print(f"  📊 Before cat: keys={before_cat_keys}, masks_count={before_cat_masks}")
+
+
                 data.cat(crop_data)
+
+
+                after_cat_masks = len(data['masks']) if 'masks' in data._stats else 0
+                after_cat_keys = list(data._stats.keys())
+                print(f"  📊 After cat: keys={after_cat_keys}, masks_count={after_cat_masks}")
+
+
+
             else:
                 print(f"  ❌ Crop {i+1} generated 0 masks")
             del crop_data
@@ -322,14 +343,28 @@ class CrowdSAM(nn.Module):
             data["rles"] = [coco_encode_rle(rle) for rle in data["rles"]] 
         else:
             data['rles'] = []
+        
+
+        # 调试
+        print(f"🔍 Before to_numpy: keys={list(data._stats.keys())}")
+        if 'masks' in data._stats:
+            print(f"✅ Before to_numpy: masks_count={len(data['masks'])}")
+        else:
+            print(f"❌ Before to_numpy: NO MASKS!")
 
         data.to_numpy()    
         print(f"🔍 Total masks after all crops: {len(data['masks']) if 'masks' in data._stats else 0}")
+        print(f"🔍 [DEBUG] _generate_masks: Final data keys = {list(data._stats.keys())}")
+        if 'masks' in data._stats:
+            print(f"✅ [DEBUG] _generate_masks: Total masks = {len(data['masks'])}")
+        else:
+            print(f"❌ [DEBUG] _generate_masks: NO MASKS in final data!")
         return data
     
     def _process_crop(self, image, crop_box):
     
         self.crop_image(image, crop_box)
+        print(f"📸 [DEBUG] _process_crop: Cropped image shape = {self.image.shape}")
         self.predictor.set_image(self.image)
         orig_h, orig_w = self.orig_image.shape[:2]
         img_size = torch.tensor(self.image.shape[:2])
@@ -359,6 +394,11 @@ class CrowdSAM(nn.Module):
         coords = (coords ) /  inv_factor
         # prompt_coords = utils.composite_clustering(coords, self.num_prompts, self.device)[0]
         points_for_image = coords.cpu().numpy()
+        print(f"📍 [DEBUG] _process_crop: Generated {len(points_for_image)} prompt points")
+        if len(points_for_image) == 0:
+            print("❌ [DEBUG] _process_crop: No prompt points, returning None")
+            return None
+
         logger.debug(f'len points {len(points_for_image)}')
         #No change here
         data = MaskData()
@@ -381,8 +421,18 @@ class CrowdSAM(nn.Module):
             if len(points) ==0:
                 continue
             batch_data = self._process_batch(points, self.predictor.original_size, crop_box)
+            if batch_data is None:
+                print(f"  ❌ [DEBUG] _process_crop: No masks for batch")
+                continue
             occupy_mask = (batch_data['masks'][batch_data['iou_preds']> self.filter_thresh]).any(0).cpu()
+
+            # 调试
+            before_cat = len(data['masks']) if 'masks' in data._stats else 0
             data.cat(batch_data)
+            after_cat = len(data['masks']) if 'masks' in data._stats else 0
+            print(f"📊 [DEBUG] data.cat: {before_cat} → {after_cat} masks")
+
+
             del batch_data
         self.predictor.reset_image()
         
@@ -428,8 +478,13 @@ class CrowdSAM(nn.Module):
             
         # data["rles"] = mask_to_rle_pytorch((utils.uncrop_masks(data["masks"], crop_box, orig_h, orig_w)))
         data['rles'] = mask_to_rle_pytorch(data["masks"])
-        data['rles_info'] = [crop_box,[orig_h, orig_w]]
-        del data['masks']
+        # data['rles_info'] = [crop_box,[orig_h, orig_w]]
+        if 'masks' in data._stats and len(data['masks']) > 0:
+            data['rles_info'] = [ [crop_box, [orig_h, orig_w]] for _ in range(len(data['masks'])) ]
+        else:
+            # 如果没有 masks，不要添加这个键
+            pass
+        # del data['masks']
             
         #Implement the box_offsets herehere 
             #apply box offsets here
@@ -441,6 +496,39 @@ class CrowdSAM(nn.Module):
             data['fboxes'] = ext_boxes
         else:
             data['fboxes'] = data['boxes']
+
+
+        # 将mask调整到原始图像尺寸
+        if 'masks' in data._stats and len(data['masks']) > 0:
+            orig_h, orig_w = self.orig_image.shape[:2]
+            uncropped_masks = []
+        
+            for mask in data['masks']:
+                # 创建原始尺寸的空 mask
+                full_mask = torch.zeros(orig_h, orig_w, dtype=mask.dtype, device=mask.device)
+                # 获取 crop 区域坐标
+                x0, y0, x1, y1 = crop_box
+                # 调整 mask 尺寸到 crop 区域大小
+                if mask.shape[0] != (y1 - y0) or mask.shape[1] != (x1 - x0):
+                    mask_resized = F.interpolate(
+                        mask.unsqueeze(0).unsqueeze(0).float(),
+                        size=(y1 - y0, x1 - x0),
+                        mode='nearest'
+                    ).squeeze(0).squeeze(0) > 0.5
+                else:
+                    mask_resized = mask > 0.5
+            
+                # 将 mask 放回原始位置
+                full_mask[y0:y1, x0:x1] = mask_resized
+                uncropped_masks.append(full_mask)
+        
+            # 替换为原始尺寸的 masks
+            data['masks'] = torch.stack(uncropped_masks, dim=0)
+
+        # print(f"✅ [DEBUG] _process_crop: Returning {len(data['masks'])} masks")
+        masks_count = len(data['masks']) if 'masks' in data._stats else 0
+        print(f"✅ [DEBUG] _process_crop: Returning {masks_count} masks")
+        
         return data
 
     @torch.no_grad()
@@ -506,10 +594,13 @@ class CrowdSAM(nn.Module):
             points=points,
             categories = categories
         )
+        print(f"📦 [DEBUG] _process_batch: Raw masks shape = {masks.shape}")
+        print(f"📦 [DEBUG] _process_batch: Raw iou_preds shape = {iou_preds.shape}")
         del masks
         # Filter by predicted IoU
         if self.pred_iou_thresh > 0.0:
             keep_mask = data["iou_preds"] > self.pred_iou_thresh
+            print(f"📦 [DEBUG] _process_batch: IoU filter - {keep_mask.sum()}/{len(keep_mask)} kept")
             data.filter(keep_mask)
         # Calculate stability score
         data["stability_score"] = calculate_stability_score(
@@ -517,7 +608,10 @@ class CrowdSAM(nn.Module):
         )
         if self.stability_score_thresh > 0.0:
             keep_mask = data["stability_score"] >= self.stability_score_thresh
+            print(f"📦 [DEBUG] _process_batch: Stability filter - {keep_mask.sum()}/{len(keep_mask)} kept")
             data.filter(keep_mask)
+        
+        print(f"📦 [DEBUG] _process_batch: Final masks = {len(data['masks']) if 'masks' in data._stats else 0}")
         # Threshold masks and calculate boxes
         data["masks"] = data["masks"] > self.predictor.model.mask_threshold
         data["boxes"] = batched_mask_to_box(data["masks"])
@@ -526,6 +620,10 @@ class CrowdSAM(nn.Module):
         keep_mask = ~utils.is_box_near_crop_edge(data["boxes"], crop_box,  [0, 0, orig_w, orig_h], self.downscale)
         if not torch.all(keep_mask):
             data.filter(keep_mask)
+
+        if len(data['masks']) == 0:
+            print("❌ [DEBUG] _process_batch: All masks filtered out!")
+            return None
         return data
     
 

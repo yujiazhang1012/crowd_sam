@@ -158,7 +158,8 @@ def predict_torch(
     )
     #B,C,H,W -> B,H,W,C for MLP to process
 
-    action_logits = self.model.mask_decoder.action_head(sparse_embeddings.mean(dim=1))
+    # 增加
+    # action_logits = self.model.mask_decoder.action_head(sparse_embeddings.mean(dim=1))
 
     # 增加动作输出类别
     return low_res_masks, iou_predictions, categories

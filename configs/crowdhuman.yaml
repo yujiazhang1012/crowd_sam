@@ -52,11 +52,11 @@ test:
 
   #post processing
   fuse_simmap: False
-  min_mask_region_area: 0
+  min_mask_region_area: 100
   box_nms_thresh: 0.65
   stability_score_thresh: 0.3
   stability_score_offset: 1
-  pred_iou_thresh: 0.1
+  pred_iou_thresh: 0.6
 
 vis:
   vis_thresh: 0.3

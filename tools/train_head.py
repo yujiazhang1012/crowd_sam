@@ -4,6 +4,7 @@ import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 import torchvision.transforms as T
+import torch.nn.functional as F
 from tqdm import tqdm
 import sys
 sys.path.append("/home/ccnu-train/zyj/crowd_sam/crowd_sam")
@@ -19,6 +20,22 @@ def get_transform():
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
+class LabelSmoothingCrossEntropy(nn.Module):
+    def __init__(self, smoothing=0.1, weight=None):
+        super().__init__()
+        self.smoothing = smoothing
+        self.confidence = 1. - smoothing
+        self.weight = weight
+
+    def forward(self, x, target):
+        log_probs = F.log_softmax(x, dim=-1)
+        nll_loss = -log_probs.gather(dim=-1, index=target.unsqueeze(1)).squeeze(1)
+        smooth_loss = -log_probs.mean(dim=-1)
+        loss = self.confidence * nll_loss + self.smoothing * smooth_loss
+        if self.weight is not None:
+            loss = loss * self.weight[target]
+        return loss.mean()   
+
 
 
 if __name__ == '__main__':
@@ -27,10 +44,10 @@ if __name__ == '__main__':
     parser.add_argument('-c', '--config_file', default='configs/crowdhuman.yaml')
     args = parser.parse_args()
     config = utils.load_config(args.config_file)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # 初始化模型（只训练 action_head）
     model = CrowdSAM(config, logger=None)
-    
     model.to(model.device)
     model.train()
 
@@ -46,7 +63,7 @@ if __name__ == '__main__':
         lr=3e-4,
         weight_decay=1e-5
     )
-    criterion = nn.CrossEntropyLoss()
+    # criterion = nn.CrossEntropyLoss()
 
     # 数据集
     dataset = CrowdHuman(
@@ -62,6 +79,13 @@ if __name__ == '__main__':
         num_workers=4,
         collate_fn=collate_fn_crowdhuman
     )
+    # 类别权重（解决不平衡）
+    class_counts = torch.tensor([520, 920, 4045, 915, 569, 58], dtype=torch.float)
+    class_weights = (1.0 / class_counts) * len(class_counts) / (1.0 / class_counts).sum()
+    class_weights = class_weights.to(device)
+    print(f"[INFO] Class Weights: {class_weights.tolist()}")
+
+    criterion = LabelSmoothingCrossEntropy(smoothing=0.1, weight=class_weights).to(device)
 
     # 训练循环
     for epoch in range(30):
@@ -86,5 +110,5 @@ if __name__ == '__main__':
 
     # 保存权重
     os.makedirs("weights", exist_ok=True)
-    torch.save(model.action_head.state_dict(), "weights/action_head.pth")
+    torch.save(model.action_head.state_dict(), "weights/action_head_1.pth")
     print("Action head training completed!")
