@@ -14,6 +14,8 @@ from loguru import logger
 import math
 from torchvision.ops.boxes import batched_nms, box_area
 import crowdsam.utils as utils
+# from torchvision.models.efficientnet import efficientnet_b0, EfficientNet_B0_weights
+import torchvision.models as models
 from segment_anything_cs.utils.amg import (
     MaskData,
     batch_iterator,
@@ -24,6 +26,64 @@ from segment_anything_cs.utils.amg import (
     mask_to_rle_pytorch,
     coco_encode_rle,
 )
+
+class EfficientNetWithCBAM(nn.Module):
+    def __init__(self):
+        super().__init__()
+        # weight = EfficientNet_B0_weights.IMAGENET1K_V1
+        # backbone = efficientnet_b0(weights=weights)
+        backbone = models.efficientnet_b0(pretrained=True)
+        self.features = backbone.features
+        # 最后的 stage 后加一个 CBAM
+        self.cbam = CBAM(1280)
+
+    def forward(self, x):
+        # x = self.backbone(x)
+        x= self.features(x)
+        x = self.cbam(x)
+        return x
+
+class ChannelAttention(nn.Module):
+    def __init__(self, in_planes,ratio=16):
+        super().__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.fc = nn.Sequential(
+            nn.Conv2d(in_planes, in_planes // ratio, 1, bias=False),
+            nn.ReLU(),
+            nn.Conv2d(in_planes // ratio, in_planes, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+    
+    def forward(self,x):
+        avg_out = self.fc(self.avg_pool(x))
+        max_out = self.fc(self.max_pool(x))
+        return self.sigmoid(avg_out + max_out)
+class SpatialAttention(nn.Module):
+    def __init__(self, kernel_size=7):
+        super().__init__()
+        padding =kernel_size//2
+        self.conv1 = nn.Conv2d(
+            2,
+            1, 
+            kernel_size=kernel_size,
+            padding=padding,
+            bias=False,
+            groups=1)
+        self.sigmoid = nn.Sigmoid()
+    def forward(self,x):
+        avg_out = torch.mean(x,dim=1,keepdim=True)
+        max_out,_ = torch.max(x,dim=1,keepdim=True)
+        return self.sigmoid(self.conv1(torch.cat([avg_out,max_out],dim=1)))
+class CBAM(nn.Module):
+    def __init__(self, in_planes,ratio=16,kernel_size=7):
+        super().__init__()
+        self.ca = ChannelAttention(in_planes, ratio)
+        self.sa = SpatialAttention(kernel_size)
+    
+    def forward(self,x):
+        return x * self.sa(x) * self.ca(x)
 
 class CrowdSAM(nn.Module):
     vis_img_id = 0
@@ -51,7 +111,8 @@ class CrowdSAM(nn.Module):
         self.action_classes = ["write", "read", "lookup", "turn_head", "raise_hand", "stand","discuss"]
         self.num_action_classes = len(self.action_classes)
         # 使用 EfficientNet-B0 作为 backbone
-        self.action_backbone = torchvision.models.efficientnet_b0(pretrained=True).features
+        # self.action_backbone = torchvision.models.efficientnet_b0(pretrained=True).features
+        self.action_backbone = EfficientNetWithCBAM().to(self.device)
         self.action_backbone.eval()
         self.action_backbone.to(self.device)
 
@@ -65,7 +126,7 @@ class CrowdSAM(nn.Module):
             nn.Linear(256, self.num_action_classes)
         ).to(self.device)
         # 加载训练好的权重（如果有）
-        action_head_path = "weights/action_head_1.pth"
+        action_head_path = "weights/action_head_2.pth"
         if os.path.exists(action_head_path):
             self.action_head.load_state_dict(torch.load(action_head_path, map_location=self.device))
 

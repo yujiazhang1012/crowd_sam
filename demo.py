@@ -65,10 +65,10 @@ def visualize_results(image, mask_data, action_classes):
 
 def main():
     CONFIG_PATH = "configs/crowdhuman.yaml"        # 配置文件路径
-    IMAGE_PATH = "dataset/crowdhuman/Images/05.jpg"       # 输入图像路径
-    OUTPUT_PATH = "demo_output.jpg"                # 输出图像路径
+    IMAGE_PATH = "dataset/crowdhuman/Images/048.jpg"       # 输入图像路径
+    OUTPUT_PATH = "demo_output_2.jpg"                # 输出图像路径
     DEVICE = "cuda"                                # 设备 (cuda 或 cpu)
-    ACTION_HEAD_PATH = "weights/action_head.pth"   # 动作识别头权重路径
+    ACTION_HEAD_PATH = "weights/action_head_2.pth"   # 动作识别头权重路径
 
     # 加载配置
     config = utils.load_config(CONFIG_PATH)
