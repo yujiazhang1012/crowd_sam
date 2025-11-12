@@ -112,7 +112,7 @@ class CrowdSAM(nn.Module):
         self.num_action_classes = len(self.action_classes)
         # 使用 EfficientNet-B0 作为 backbone
         # self.action_backbone = torchvision.models.efficientnet_b0(pretrained=True).features
-        self.action_backbone = EfficientNetWithCBAM().to(self.device)
+        self.action_backbone = EfficientNetWithCBAM()
         self.action_backbone.eval()
         self.action_backbone.to(self.device)
 
@@ -126,7 +126,7 @@ class CrowdSAM(nn.Module):
             nn.Linear(256, self.num_action_classes)
         ).to(self.device)
         # 加载训练好的权重（如果有）
-        action_head_path = "weights/action_head_2.pth"
+        action_head_path = "weights/action_head_best.pth"
         if os.path.exists(action_head_path):
             self.action_head.load_state_dict(torch.load(action_head_path, map_location=self.device))
 
@@ -152,6 +152,10 @@ class CrowdSAM(nn.Module):
         self.min_mask_region_area = config['test']['min_mask_region_area']
         self.pos_sim_thresh = config['test']['pos_sim_thresh']
         self.output_rles = config['test']['output_rles']
+
+
+
+
         if legacy_mode:
             self.patch_size = config['model']['patch_size'] # vit_l for dino
             self.feat_size = feat_size
@@ -173,7 +177,8 @@ class CrowdSAM(nn.Module):
      
         #other parameters
 
-
+    # 提取几何特征
+    
 
     #load sam model according to specifiedd arguments
     def load_sam_model(self, sam_model, sam_arch, sam_checkpoint, sam_adapter_checkpoint, dino_model, n_class):
@@ -208,6 +213,7 @@ class CrowdSAM(nn.Module):
         """
         对单个 mask 区域进行动作分类
         """
+        print(f"🔍 Processing mask of shape: {mask.shape if isinstance(mask, np.ndarray) else mask.shape}")
         if isinstance(mask, torch.Tensor):
                 mask_np = mask.cpu().numpy()
         else:
@@ -219,8 +225,12 @@ class CrowdSAM(nn.Module):
                 return 0, "unknown", 0.0, [0, 0, 0, 0]
 
             # 计算 tight bbox
-        x1_mask, x2_mask = xs.min(), xs.max()
-        y1_mask, y2_mask = ys.min(), ys.max()
+        # x1_mask, x2_mask = xs.min(), xs.max()
+        # y1_mask, y2_mask = ys.min(), ys.max()
+        bbox = self.get_tight_bbox_from_mask(mask_bool)
+        if bbox is None:
+            return 0, "unknown", 0.0, [0, 0, 0, 0]
+        x1_mask, y1_mask, x2_mask, y2_mask = bbox
     
             # 缩放到原始图像坐标
         h_mask, w_mask = mask_bool.shape
@@ -233,23 +243,32 @@ class CrowdSAM(nn.Module):
         y2_orig = int(y2_mask * scale_h)
         tight_box = [x1_orig, y1_orig, x2_orig, y2_orig]
 
-            # 面积过滤
+        # 面积过滤
         area = (x2_orig - x1_orig) * (y2_orig - y1_orig)
         total_area = h_img * w_img
         area_ratio = area / total_area
-        if area_ratio < 0.003 or area_ratio > 0.15:
-                return 0, "unknown", 0.0, [0, 0, 0, 0]
+        if area_ratio < 0.001 or area_ratio > 0.25:
+            return 0, "unknown", 0.0, [0, 0, 0, 0]
 
-            # 裁剪 ROI
-        margin_w = int((x2_orig - x1_orig) * 0.1)
-        margin_h = int((y2_orig - y1_orig) * 0.1)
+        # 裁剪 ROI
+        min_margin = 20
+        margin_w = max(min_margin, int((x2_orig - x1_orig) * 0.15))
+        margin_h = max(min_margin, int((y2_orig - y1_orig) * 0.15))
         x1_crop = max(0, x1_orig - margin_w)
         y1_crop = max(0, y1_orig - margin_h)
         x2_crop = min(w_img, x2_orig + margin_w)
         y2_crop = min(h_img, y2_orig + margin_h)
+
         roi = image[y1_crop:y2_crop, x1_crop:x2_crop]
         if roi.size == 0:
-                return 0, "unknown", 0.0, [0, 0, 0, 0]
+            return 0, "unknown", 0.0, [0, 0, 0, 0]
+
+        roi_h, roi_w = roi.shape[:2]
+        aspect_ratio = roi_w / roi_h
+        if aspect_ratio < 0.3 or aspect_ratio > 3.0 or roi_h < 64 or roi_w < 64:
+            return 0, "unknown", 0.0, [0, 0, 0, 0]
+
+
 
         ## 图像预处理
         roi_pil = Image.fromarray(roi).convert('RGB')
@@ -261,17 +280,31 @@ class CrowdSAM(nn.Module):
         roi_tensor = transform(roi_pil).unsqueeze(0).to(self.device)
 
         # 特征提取 + 分类
-        features = self.action_backbone(roi_tensor)
-        logits = self.action_head(features)
-        probs = F.softmax(logits, dim=-1)
-        conf, pred = probs.max(dim=-1)
+        with torch.no_grad():
+            cnn_features = self.action_backbone(roi_tensor)
+            logits = self.action_head(cnn_features)
+            # 添加 Temperature Scaling
+            # temperature = 1.5
+            probs = F.softmax(logits, dim=-1)
+            conf, pred = probs.max(dim=-1)
 
         action_id = pred.item()
         confidence = conf.item()
-
         action_name = self.action_classes[action_id]
 
+        print(f"📊 Prediction: {action_name} (conf: {confidence:.3f}, id: {action_id})")
+        print(f"   All probs: {[f'{name}:{prob:.3f}' for name, prob in zip(self.action_classes, probs[0].cpu().numpy())]}")
         return action_id, action_name, confidence, tight_box
+    
+    
+    def get_tight_bbox_from_mask(self, mask_bool):
+        mask_uint8 = mask_bool.astype(np.uint8) * 255
+        contours, _ = cv2.findContours(mask_uint8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        if not contours:
+            return None
+        all_points = np.concatenate(contours)
+        x, y, w, h = cv2.boundingRect(all_points)
+        return [x, y, x + w, y + h]
         
     
 
@@ -336,36 +369,36 @@ class CrowdSAM(nn.Module):
 
     def _generate_masks(self, image):
         img_size = np.array(image).shape[:2]
-        print(f"🔍 Input image size: {img_size}")  # 调试1
-         # ===== 添加调试：打印 crop 参数 =====
-        print(f"🔧 crop_n_layers: {self.crop_n_layers}")
-        print(f"🔧 crop_overlap_ratio: {self.crop_overlap_ratio}")
-        print(f"🔧 max_size: {self.max_size}")
-        #===============> Step 1. Genereate crops         
+        # print(f"🔍 Input image size: {img_size}")  # 调试1
+         
+        # print(f"🔧 crop_n_layers: {self.crop_n_layers}")
+        # print(f"🔧 crop_overlap_ratio: {self.crop_overlap_ratio}")
+        # print(f"🔧 max_size: {self.max_size}")
+               
         crop_boxes, layer_idxs = generate_crop_boxes(
             img_size, self.crop_n_layers, self.crop_overlap_ratio
         )
-        print(f"🔍 Generated {len(crop_boxes)} crop boxes")  # 调试2
+        # print(f"🔍 Generated {len(crop_boxes)} crop boxes")  # 调试2
         for i, box in enumerate(crop_boxes):
             print(f"  Crop {i+1}: {box}")
         layer_idxs = np.ones(len(crop_boxes))    
         data = MaskData()
         #===============> Step 2. Process Crops   
         for i, (crop_box, layer_idx) in enumerate(zip(crop_boxes, layer_idxs)):
-            print(f"🔍 Processing crop {i+1}/{len(crop_boxes)}: {crop_box}")
+            # print(f"🔍 Processing crop {i+1}/{len(crop_boxes)}: {crop_box}")
             crop_data = self._process_crop(image, crop_box)
         
             if crop_data is None:
-                print(f"  ❌ Crop {i+1} returned None")
+                # print(f"  ❌ Crop {i+1} returned None")
                 continue
             
             if 'masks' in crop_data._stats and len(crop_data['masks']) > 0:
-                print(f"  ✅ Crop {i+1} generated {len(crop_data['masks'])} masks")
+                # print(f"  ✅ Crop {i+1} generated {len(crop_data['masks'])} masks")
 
                 # 调试
                 before_cat_masks = len(data['masks']) if 'masks' in data._stats else 0
                 before_cat_keys = list(data._stats.keys())
-                print(f"  📊 Before cat: keys={before_cat_keys}, masks_count={before_cat_masks}")
+                # print(f"  📊 Before cat: keys={before_cat_keys}, masks_count={before_cat_masks}")
 
 
                 data.cat(crop_data)
@@ -373,7 +406,7 @@ class CrowdSAM(nn.Module):
 
                 after_cat_masks = len(data['masks']) if 'masks' in data._stats else 0
                 after_cat_keys = list(data._stats.keys())
-                print(f"  📊 After cat: keys={after_cat_keys}, masks_count={after_cat_masks}")
+                # print(f"  📊 After cat: keys={after_cat_keys}, masks_count={after_cat_masks}")
 
 
 
@@ -407,25 +440,25 @@ class CrowdSAM(nn.Module):
         
 
         # 调试
-        print(f"🔍 Before to_numpy: keys={list(data._stats.keys())}")
-        if 'masks' in data._stats:
-            print(f"✅ Before to_numpy: masks_count={len(data['masks'])}")
-        else:
-            print(f"❌ Before to_numpy: NO MASKS!")
+        # print(f"🔍 Before to_numpy: keys={list(data._stats.keys())}")
+        # if 'masks' in data._stats:
+        #     print(f"✅ Before to_numpy: masks_count={len(data['masks'])}")
+        # else:
+        #     print(f"❌ Before to_numpy: NO MASKS!")
 
         data.to_numpy()    
-        print(f"🔍 Total masks after all crops: {len(data['masks']) if 'masks' in data._stats else 0}")
-        print(f"🔍 [DEBUG] _generate_masks: Final data keys = {list(data._stats.keys())}")
-        if 'masks' in data._stats:
-            print(f"✅ [DEBUG] _generate_masks: Total masks = {len(data['masks'])}")
-        else:
-            print(f"❌ [DEBUG] _generate_masks: NO MASKS in final data!")
+        # print(f"🔍 Total masks after all crops: {len(data['masks']) if 'masks' in data._stats else 0}")
+        # print(f"🔍 [DEBUG] _generate_masks: Final data keys = {list(data._stats.keys())}")
+        # if 'masks' in data._stats:
+        #     print(f"✅ [DEBUG] _generate_masks: Total masks = {len(data['masks'])}")
+        # else:
+        #     print(f"❌ [DEBUG] _generate_masks: NO MASKS in final data!")
         return data
     
     def _process_crop(self, image, crop_box):
     
         self.crop_image(image, crop_box)
-        print(f"📸 [DEBUG] _process_crop: Cropped image shape = {self.image.shape}")
+        # print(f"📸 [DEBUG] _process_crop: Cropped image shape = {self.image.shape}")
         self.predictor.set_image(self.image)
         orig_h, orig_w = self.orig_image.shape[:2]
         img_size = torch.tensor(self.image.shape[:2])
@@ -455,10 +488,10 @@ class CrowdSAM(nn.Module):
         coords = (coords ) /  inv_factor
         # prompt_coords = utils.composite_clustering(coords, self.num_prompts, self.device)[0]
         points_for_image = coords.cpu().numpy()
-        print(f"📍 [DEBUG] _process_crop: Generated {len(points_for_image)} prompt points")
-        if len(points_for_image) == 0:
-            print("❌ [DEBUG] _process_crop: No prompt points, returning None")
-            return None
+        # print(f"📍 [DEBUG] _process_crop: Generated {len(points_for_image)} prompt points")
+        # if len(points_for_image) == 0:
+        #     print("❌ [DEBUG] _process_crop: No prompt points, returning None")
+        #     return None
 
         logger.debug(f'len points {len(points_for_image)}')
         #No change here
@@ -483,7 +516,7 @@ class CrowdSAM(nn.Module):
                 continue
             batch_data = self._process_batch(points, self.predictor.original_size, crop_box)
             if batch_data is None:
-                print(f"  ❌ [DEBUG] _process_crop: No masks for batch")
+                # print(f"  ❌ [DEBUG] _process_crop: No masks for batch")
                 continue
             occupy_mask = (batch_data['masks'][batch_data['iou_preds']> self.filter_thresh]).any(0).cpu()
 
@@ -491,7 +524,7 @@ class CrowdSAM(nn.Module):
             before_cat = len(data['masks']) if 'masks' in data._stats else 0
             data.cat(batch_data)
             after_cat = len(data['masks']) if 'masks' in data._stats else 0
-            print(f"📊 [DEBUG] data.cat: {before_cat} → {after_cat} masks")
+            # print(f"📊 [DEBUG] data.cat: {before_cat} → {after_cat} masks")
 
 
             del batch_data

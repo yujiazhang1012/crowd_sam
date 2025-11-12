@@ -65,10 +65,10 @@ def visualize_results(image, mask_data, action_classes):
 
 def main():
     CONFIG_PATH = "configs/crowdhuman.yaml"        # 配置文件路径
-    IMAGE_PATH = "dataset/crowdhuman/Images/048.jpg"       # 输入图像路径
-    OUTPUT_PATH = "demo_output_2.jpg"                # 输出图像路径
+    IMAGE_PATH = "dataset/crowdhuman/Images/036.jpg"       # 输入图像路径
+    OUTPUT_PATH = "demo_output_5.jpg"                # 输出图像路径
     DEVICE = "cuda"                                # 设备 (cuda 或 cpu)
-    ACTION_HEAD_PATH = "weights/action_head_2.pth"   # 动作识别头权重路径
+    ACTION_HEAD_PATH = "weights/action_head_best.pth"   # 动作识别头权重路径
 
     # 加载配置
     config = utils.load_config(CONFIG_PATH)
@@ -79,11 +79,16 @@ def main():
     model = CrowdSAM(config, logger=None)
     model.eval()
 
+    # 添加调试
+    # print(f"🎯 Model action_classes: {model.action_classes}")
+    # print(f"🎯 Number of action classes: {model.num_action_classes}")
+    # print(f"🎯 Action head architecture: {model.action_head}")
 
 
     
     # 加载动作识别头权重（如果存在）
     if os.path.exists(ACTION_HEAD_PATH):
+        print(f"✅ Found weights at: {ACTION_HEAD_PATH}")
         model.action_head.load_state_dict(
             torch.load(ACTION_HEAD_PATH, map_location=model.device)
         )
@@ -109,7 +114,7 @@ def main():
     print("Running inference...")
     with torch.no_grad():
         mask_data = model.generate(image_rgb)
-    # 调试：检查 mask_data 内容
+   
     print(f"mask_data keys: {list(mask_data._stats.keys())}")
     if 'masks' in mask_data._stats:
         print(f"Number of masks: {len(mask_data['masks'])}")
@@ -125,11 +130,21 @@ def main():
     print(f"Results saved to {OUTPUT_PATH}")
 
     # 打印统计信息
-    if 'actions' in mask_data and len(mask_data['actions']) > 0:
-        num_detections = len(mask_data['actions'])
-        print(f"Detected {num_detections} persons")
-        for i, action in enumerate(mask_data['actions']):
-            print(f"  Person {i+1}: {action['action_name']} (conf: {action['confidence']:.2f})")
+    if 'actions' in mask_data._stats and len(mask_data['actions']) > 0:
+        actions = mask_data._stats['actions']  # 直接访问 _stats
+        num_detections = len(actions)
+        print(f"\n📊 Detected {num_detections} persons")
+        action_count = {}
+        for i, action in enumerate(actions):
+            action_name = action['action_name']
+            if action_name not in action_count:
+                action_count[action_name] = 0
+            action_count[action_name] += 1
+            print(f"  Person {i+1}: {action_name} (conf: {action['confidence']:.2f})")
+        
+        print("\n📈 Action distribution:")
+        for action_name, count in action_count.items():
+            print(f"  {action_name}: {count}")
     else:
         print("No persons detected!")
 
