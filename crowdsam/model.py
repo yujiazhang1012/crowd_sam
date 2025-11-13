@@ -120,7 +120,7 @@ class CrowdSAM(nn.Module):
         self.action_head = nn.Sequential(
             nn.AdaptiveAvgPool2d((1, 1)),
             nn.Flatten(),
-            nn.Linear(1280, 256),
+            nn.Linear(1280 , 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, self.num_action_classes)
@@ -155,7 +155,6 @@ class CrowdSAM(nn.Module):
 
 
 
-
         if legacy_mode:
             self.patch_size = config['model']['patch_size'] # vit_l for dino
             self.feat_size = feat_size
@@ -176,9 +175,6 @@ class CrowdSAM(nn.Module):
         #original sam automask generater args
      
         #other parameters
-
-    # 提取几何特征
-    
 
     #load sam model according to specifiedd arguments
     def load_sam_model(self, sam_model, sam_arch, sam_checkpoint, sam_adapter_checkpoint, dino_model, n_class):
@@ -209,6 +205,96 @@ class CrowdSAM(nn.Module):
         dino_model = dino_model.to(self.device)
         sam = sam.to(self.device)
         return predictor
+    
+    # 教室场景几何特征
+    def extract_geometric_features(self, mask: np.ndarray, bbox: list, image_shape: tuple):
+        """
+        您设计的 8 维几何特征
+        """
+        x1, y1, x2, y2 = bbox
+        h_img, w_img = image_shape[:2]
+        h_mask, w_mask = mask.shape[:2]
+
+        # 归一化高度
+        height_norm = (y2 - y1) / h_img
+
+        # 手是否高于头部
+        ys, xs = np.where(mask)
+        if len(ys) == 0:
+            hand_above_head = 0.0
+        else:
+            # 在 mask 的尺度下判断
+            upper_body_y = (y1 + y2) // 2
+            hand_in_upper = ys < upper_body_y
+            if hand_in_upper.any():
+                hand_center_y = ys[hand_in_upper].min()
+                head_center_y = upper_body_y
+                hand_above_head = float(hand_center_y < head_center_y)
+            else:
+                hand_above_head = 0.0
+
+        aspect_ratio = (x2 - x1) / (y2 - y1 + 1e-6)
+
+        mask_float = mask.astype(float)
+        weighted_y = (np.arange(mask.shape[0])[:, None] * mask_float).sum() / (mask_float.sum() + 1e-6)
+        vertical_center_norm = weighted_y / h_img
+
+        is_tall = float(height_norm > 0.3)
+
+        # 头部存在性判断
+        head_region_height = 0.2 * (y2 - y1)
+        head_y_min = y1
+        head_y_max = y1 + head_region_height
+        head_pixels = mask[int(head_y_min):int(head_y_max), :].sum()
+        has_head = head_pixels > 10
+
+        if not has_head:
+            return None
+
+        # 手部相对位置
+        if len(ys) > 0:
+            body_center_y = (y1 + y2) / 2
+            hand_relative_y = (hand_center_y - body_center_y) / (y2 - y1 + 1e-6) if 'hand_center_y' in locals() else 0.0
+        else:
+            hand_relative_y = 0.0
+        
+        # 头部朝向
+        head_mask = mask[int(head_y_min):int(head_y_max), :]
+        if head_mask.sum() > 0:
+            head_ys, head_xs = np.where(head_mask)
+            if len(head_ys) > 0:
+                head_center_x = np.mean(head_xs)
+                head_width = head_xs.max() - head_xs.min()
+                head_aspect = head_width / (head_ys.max() - head_ys.min() + 1e-6)
+                head_orientation = float(head_center_x > w_mask / 2)  # 0: 左，1: 右
+            else:
+                head_orientation = 0.0
+        else:
+            head_orientation = 0.0
+
+        # 身体倾斜度
+        if len(xs) > 0 and len(ys) > 0:
+            cov_matrix = np.cov(np.vstack([xs, ys]))
+            eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
+            major_axis_angle = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])
+            body_tilt = np.sin(major_axis_angle)
+        else:
+            body_tilt = 0.0
+
+        geo_feat = np.array([
+            height_norm,
+            hand_above_head,
+            aspect_ratio,
+            vertical_center_norm,
+            is_tall,
+            hand_relative_y,  
+            head_orientation, 
+            body_tilt 
+        ], dtype=np.float32)
+
+        return geo_feat
+
+
     def classify_roi_from_mask(self, image: np.ndarray, mask: torch.Tensor):
         """
         对单个 mask 区域进行动作分类
@@ -224,7 +310,7 @@ class CrowdSAM(nn.Module):
         if len(ys) == 0:
                 return 0, "unknown", 0.0, [0, 0, 0, 0]
 
-            # 计算 tight bbox
+        # 计算 tight bbox
         # x1_mask, x2_mask = xs.min(), xs.max()
         # y1_mask, y2_mask = ys.min(), ys.max()
         bbox = self.get_tight_bbox_from_mask(mask_bool)
@@ -268,7 +354,11 @@ class CrowdSAM(nn.Module):
         if aspect_ratio < 0.3 or aspect_ratio > 3.0 or roi_h < 64 or roi_w < 64:
             return 0, "unknown", 0.0, [0, 0, 0, 0]
 
-
+        # 提取几何特征
+        geo_features = self.extract_geometric_features(mask_np, tight_box, image.shape)
+        if geo_features is None:
+            return 0, "unknown", 0.0, [0, 0, 0, 0]
+        geo_features_tensor = torch.from_numpy(geo_features).float().to(self.device).unsqueeze(0)
 
         ## 图像预处理
         roi_pil = Image.fromarray(roi).convert('RGB')
@@ -282,6 +372,11 @@ class CrowdSAM(nn.Module):
         # 特征提取 + 分类
         with torch.no_grad():
             cnn_features = self.action_backbone(roi_tensor)
+            cnn_features_flat = F.adaptive_avg_pool2d(cnn_features, 1).flatten(1)
+            print(f"🔍 CNN features shape: {cnn_features_flat.shape}")  # 应该是 (1, 1280)
+            print(f"🔍 Geo features shape: {geo_features_tensor.shape}") 
+            combined_features = torch.cat([cnn_features_flat, geo_features_tensor], dim=1)
+            print(f"🔍 Combined features shape: {cnn_features.shape}")
             logits = self.action_head(cnn_features)
             # 添加 Temperature Scaling
             # temperature = 1.5
@@ -307,7 +402,6 @@ class CrowdSAM(nn.Module):
         return [x, y, x + w, y + h]
         
     
-
 
     def crop_image(self, image, crop_box, sim_map=None):
         
@@ -400,14 +494,11 @@ class CrowdSAM(nn.Module):
                 before_cat_keys = list(data._stats.keys())
                 # print(f"  📊 Before cat: keys={before_cat_keys}, masks_count={before_cat_masks}")
 
-
                 data.cat(crop_data)
-
 
                 after_cat_masks = len(data['masks']) if 'masks' in data._stats else 0
                 after_cat_keys = list(data._stats.keys())
                 # print(f"  📊 After cat: keys={after_cat_keys}, masks_count={after_cat_masks}")
-
 
 
             else:
@@ -526,7 +617,6 @@ class CrowdSAM(nn.Module):
             after_cat = len(data['masks']) if 'masks' in data._stats else 0
             # print(f"📊 [DEBUG] data.cat: {before_cat} → {after_cat} masks")
 
-
             del batch_data
         self.predictor.reset_image()
         
@@ -590,7 +680,6 @@ class CrowdSAM(nn.Module):
             data['fboxes'] = ext_boxes
         else:
             data['fboxes'] = data['boxes']
-
 
         # 将mask调整到原始图像尺寸
         if 'masks' in data._stats and len(data['masks']) > 0:
@@ -721,7 +810,6 @@ class CrowdSAM(nn.Module):
         return data
     
 
-
     @staticmethod
     def postprocess_small_regions(
         mask_data: MaskData, min_area: int, nms_thresh: float
@@ -778,5 +866,3 @@ class CrowdSAM(nn.Module):
         fg_mask = sim_map > pos_sim_thresh
         coords = fg_mask.nonzero()[:,[1,0]]
         return coords
-    
-    

@@ -88,6 +88,9 @@ class AugmentedCrowdHuman(CrowdHuman):
                 roi = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(roi)
             else:
                 roi = self.val_transform(roi)
+        # 获取原始图像尺寸
+        # h_img = img_info.get('height',224), 
+        # w_img = img_info.get('width',224)
         return roi, label, img_info
 
     def _strong_augment(self, img):
@@ -242,14 +245,19 @@ if __name__ == '__main__':
     criterion = LabelSmoothingCrossEntropy(weight = class_weights, smoothing = 0.1).to(device)
 
     best_acc = 0.0
-    for epoch in range(100):
+    for epoch in range(30):
         model.train()
         total_loss = 0
+        total_samples = 0
+        valid_samples = 0
         for rois, labels, _ in tqdm(train_dataloader, desc=f"Epoch {epoch+1}"):
             rois = rois.to(model.device)
             labels = labels.to(model.device)
             optimizer.zero_grad()
             features = model.action_backbone(rois)
+            cnn_features_flat = F.adaptive_avg_pool2d(features, 1).flatten(1)
+
+           
             logits = model.action_head(features)
             loss = criterion(logits, labels)
             loss.backward()
