@@ -20,9 +20,101 @@ import sys
 sys.path.append("/home/ccnu-train/zyj/crowd_sam/crowd_sam")
 
 from crowdsam.model import CrowdSAM
+
 from crowdsam.data import CrowdHuman, collate_fn_crowdhuman
 import crowdsam.utils as utils
+def extract_geometric_features_from_bbox_mask(bbox, mask_np, image_shape):
+    """
+    从 bbox 和 mask_np 提取几何特征
+    """
+    x1, y1, x2, y2 = bbox
+    h_img, w_img = image_shape[:2]
+    h_mask, w_mask = mask_np.shape[:2]
 
+    height_norm = (y2 - y1) / h_img
+
+    # 手高于头部 (改进版)
+    mask_bool = mask_np.astype(bool)
+    ys, xs = np.where(mask_bool)
+    if len(ys) > 0:
+        upper_body_height = 0.4 * (y2 - y1)
+        upper_body_y_min = y1
+        upper_body_y_max = y1 + upper_body_height
+        hand_in_upper = (ys >= upper_body_y_min) & (ys <= upper_body_y_max)
+        hand_above_head = float(hand_in_upper.any())
+    else:
+        hand_above_head = 0.0
+
+    aspect_ratio = (x2 - x1) / (y2 - y1 + 1e-6)
+
+    mask_float = mask_np.astype(float)
+    weighted_y = (np.arange(mask_np.shape[0])[:, None] * mask_float).sum() / (mask_float.sum() + 1e-6)
+    vertical_center_norm = weighted_y / h_img
+
+    is_tall = float(height_norm > 0.3)
+
+    # 头部存在性 (改进版)
+    head_region_height = 0.2 * (y2 - y1)
+    head_y_min = y1
+    head_y_max = y1 + head_region_height
+    head_pixels = mask_np[int(head_y_min):int(head_y_max), :].sum()
+    head_area_ratio = head_pixels / (mask_float.sum() + 1e-6)
+    has_head = head_area_ratio > 0.05
+
+    if not has_head:
+        return None
+
+    # 手部相对位置 (简化，基于上半身判断)
+    if len(ys) > 0:
+        body_center_y = (y1 + y2) / 2
+        if hand_above_head:
+            # 如果手在上半身，计算其重心
+            hand_ys_in_upper = ys[hand_in_upper]
+            if len(hand_ys_in_upper) > 0:
+                hand_center_y = hand_ys_in_upper.min()
+                hand_relative_y = (hand_center_y - body_center_y) / (y2 - y1 + 1e-6)
+            else:
+                hand_relative_y = 0.0
+        else:
+            hand_relative_y = 0.0
+    else:
+        hand_relative_y = 0.0
+
+    # 头部朝向 (简化)
+    head_mask = mask_np[int(head_y_min):int(head_y_max), :]
+    if head_mask.sum() > 0:
+        head_ys, head_xs = np.where(head_mask)
+        if len(head_ys) > 0:
+            head_center_x = np.mean(head_xs)
+            head_width = head_xs.max() - head_xs.min()
+            head_aspect = head_width / (head_ys.max() - head_ys.min() + 1e-6)
+            head_orientation = float(head_center_x > w_mask / 2)
+        else:
+            head_orientation = 0.0
+    else:
+        head_orientation = 0.0
+
+    # 身体倾斜度 (简化，使用重心)
+    if len(xs) > 0 and len(ys) > 0:
+        cx = (np.arange(mask_np.shape[1]) * mask_float.sum(axis=0)).sum() / (mask_float.sum() + 1e-6)
+        cy = (np.arange(mask_np.shape[0]) * mask_float.sum(axis=1)).sum() / (mask_float.sum() + 1e-6)
+        body_center_y = (y1 + y2) / 2
+        body_tilt = (cy - body_center_y) / (y2 - y1 + 1e-6)
+    else:
+        body_tilt = 0.0
+
+    geo_feat = np.array([
+        height_norm,
+        hand_above_head,
+        aspect_ratio,
+        vertical_center_norm,
+        is_tall,
+        hand_relative_y,
+        head_orientation,
+        body_tilt
+    ], dtype=np.float32)
+
+    return geo_feat
 
 def get_train_transform():
     return T.Compose([
@@ -41,8 +133,6 @@ def get_val_transform():
         T.ToTensor(),
         T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-
-
 class AugmentedCrowdHuman(CrowdHuman):
     def __init__(self, dataset_root, annot_path, use_sam_masks=True, class_counts=None, is_train=True):
         super().__init__(dataset_root, annot_path, transform=None, use_sam_masks=use_sam_masks)
@@ -53,46 +143,46 @@ class AugmentedCrowdHuman(CrowdHuman):
         self.is_train = is_train  # 控制是否使用增强
 
     def __getitem__(self, idx):
-        roi, label, img_info = super().__getitem__(idx)
-        
-        if isinstance(roi, torch.Tensor):
-            roi = T.ToPILImage()(roi)
-        elif isinstance(roi, np.ndarray):
-            roi = Image.fromarray(roi.astype('uint8'), 'RGB')
-        # else:
-        #     roi = Image.open(roi).convert('RGB')
+        image_path, bbox, label = self.samples[idx]
+        original_image_pil = Image.open(image_path).convert('RGB')
+        original_image_np = np.array(original_image_pil)
+        image_shape = original_image_np.shape
+        x, y, w, h = bbox
+        h_img, w_img = image_shape[:2]
+        mask_np = np.zeros((h_img, w_img), dtype=np.uint8)
+        y1, y2 = max(0, int(y)), min(h_img, int(y + h))
+        x1, x2 = max(0, int(x)), min(w_img, int(x + w))
+        mask_np[y1:y2, x1:x2] = 1
+        bbox_xyxy = [int(x), int(y), int(x + w), int(y + h)]
+        geo_features = extract_geometric_features_from_bbox_mask(bbox_xyxy, mask_np, image_shape)
+        if geo_features is None:
+            # 如果几何特征计算失败，使用默认值
+            geo_features = np.zeros(8, dtype=np.float32)
+            # print(f"Warning: Could not compute geo features for sample {idx}, using zeros.")
+        roi_pil = original_image_pil.crop((x, y, x + w, y + h))
+        roi_w, roi_h = roi_pil.size
+        aspect_ratio = roi_w / roi_h
+        if aspect_ratio < 0.3 or aspect_ratio > 3.0 or roi_h < 64 or roi_w < 64:
+            # 如果 ROI 不符合要求，用一个默认图像填充
+            roi_pil = Image.new('RGB', (224, 224), color='black')
+            geo_features = np.zeros(8, dtype=np.float32) # 也重置 geo_features
+            label = 0
 
-        elif not isinstance(roi, Image.Image):
-            raise TypeError(f"Unexpected roi type: {type(roi)}")
-        # 如果已经是 Image.Image，直接跳过转换
-
-        roi = roi.convert('RGB')  # 确保三通道
-
-        # 验证模式：直接使用 val_transform
         if not self.is_train:
-            roi = self.val_transform(roi)
-            return roi, label, img_info
-
-        # 训练模式：使用增强
-        if label in self.rare_classes or label in [0,1,3]:
-            roi = self._strong_augment(roi)
+            roi_tensor = self.val_transform(roi_pil)
         else:
-            if random.random() < 0.3:
-                roi = self.train_transform.transforms[0](roi)
-                roi = self.train_transform.transforms[1](roi)
-                if random.random() < 0.5:
-                    roi = T.RandomHorizontalFlip(p=1.0)(roi)
-                if random.random() < 0.3:
-                    roi = T.ColorJitter(brightness=0.1, contrast=0.1)(roi)
-                roi = T.ToTensor()(roi)
-                roi = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(roi)
+            if label in self.rare_classes or label in [0, 1, 3]:
+                roi_tensor = self._strong_augment(roi_pil)
             else:
-                roi = self.val_transform(roi)
-        # 获取原始图像尺寸
-        # h_img = img_info.get('height',224), 
-        # w_img = img_info.get('width',224)
-        return roi, label, img_info
+                if random.random() < 0.3:
+                    roi_tensor = self._weak_augment(roi_pil)
+                else:
+                    roi_tensor = self.val_transform(roi_pil)
+        geo_features_tensor = torch.from_numpy(geo_features).float()
+        label_tensor = torch.tensor(label, dtype=torch.long)
 
+        # 返回包含 geo_features 的元组
+        return roi_tensor, geo_features_tensor, label_tensor
     def _strong_augment(self, img):
 
         # 对小样本类别使用更强的增强
@@ -107,8 +197,22 @@ class AugmentedCrowdHuman(CrowdHuman):
         img = T.RandomErasing(p=0.4, scale=(0.02, 0.15))(img)  
         img = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(img)
         return img
-
-
+    def _weak_augment(self, img):
+        img = T.Resize((256, 256))(img)
+        img = T.RandomCrop(224)(img)
+        if random.random() < 0.5:
+            img = T.RandomHorizontalFlip(p=1.0)(img)
+        if random.random() < 0.3:
+            img = T.ColorJitter(brightness=0.1, contrast=0.1)(img)
+        img = T.ToTensor()(img)
+        img = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])(img)
+        return img
+def collate_fn_for_training(batch):
+    rois, geo_features, labels = zip(*batch)
+    rois = torch.stack(rois)
+    geo_features = torch.stack(geo_features)
+    labels = torch.stack(labels)
+    return rois, geo_features, labels
 class LabelSmoothingCrossEntropy(nn.Module):
     def __init__(self, smoothing=0.1, weight=None):
         super().__init__()
@@ -125,7 +229,6 @@ class LabelSmoothingCrossEntropy(nn.Module):
             loss = loss * self.weight[target]
         return loss.mean()
 
-
 def validate_model(model, val_dataloader, device, class_names, result_dir, epoch):
     model.eval()
     all_preds = []
@@ -134,11 +237,14 @@ def validate_model(model, val_dataloader, device, class_names, result_dir, epoch
     
 
     with torch.no_grad():
-        for rois, labels, _ in tqdm(val_dataloader, desc="Validating"):
+        for rois, geo_features, labels in tqdm(val_dataloader, desc="Validating"):
             rois = rois.to(device)
+            geo_features = geo_features.to(device)
             labels = labels.to(device)
-            features = model.action_backbone(rois)
-            logits = model.action_head(features)
+            cnn_features = model.action_backbone(rois)
+            cnn_features_flat = F.adaptive_avg_pool2d(cnn_features, 1).flatten(1)
+            combined_features = torch.cat([cnn_features_flat, geo_features], dim=1)
+            logits = model.action_head(combined_features)
             preds = logits.argmax(dim=1)
             all_preds.extend(preds.cpu().numpy())
             all_labels.extend(labels.cpu().numpy())
@@ -170,7 +276,6 @@ def validate_model(model, val_dataloader, device, class_names, result_dir, epoch
     plt.close()
     model.train()
     return acc
-
 
 if __name__ == '__main__':
     import argparse
@@ -214,6 +319,19 @@ if __name__ == '__main__':
     ], weight_decay=1e-5)
 
     class_counts_list = [520, 920, 4045, 915, 569, 58, 6]
+    raw_train_dataset = CrowdHuman(
+        dataset_root=config['data']['dataset_root'],
+        annot_path=config['data']['train_file'],
+        transform=None, # 在 AugmentedCrowdHuman 中处理
+        use_sam_masks=True
+    )
+    raw_val_dataset = CrowdHuman(
+        dataset_root=config['data']['dataset_root'],
+        annot_path=config['data']['json_file'], # 修复路径
+        transform=None, # 在 AugmentedCrowdHuman 中处理
+        use_sam_masks=True
+    )
+
     train_dataset = AugmentedCrowdHuman(
         dataset_root=config['data']['dataset_root'],
         annot_path=config['data']['train_file'],
@@ -221,44 +339,35 @@ if __name__ == '__main__':
         class_counts=class_counts_list,
         is_train=True
     )
-    # 构建平衡验证层
-    all_indices = list(range(len(train_dataset)))
-    train_indices, val_indices = train_test_split(
-        all_indices, 
-        test_size=0.1, 
-        stratify=[train_dataset[i][1] for i in all_indices],
-        random_state=42)
     val_dataset = AugmentedCrowdHuman(
         dataset_root=config['data']['dataset_root'],
-        annot_path=config['data']['json_file'],
+        annot_path=config['data']['json_file'], # 修复路径
         use_sam_masks=True,
         class_counts=class_counts_list,
         is_train=False  
     )
-    # 创建训练集和验证集子集
-    train_dataset = Subset(train_dataset, train_indices)
-    val_dataset = Subset(val_dataset, val_indices)
 
-    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4, collate_fn=collate_fn_crowdhuman)
-    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, collate_fn=collate_fn_crowdhuman)
+    train_dataloader = DataLoader(train_dataset, batch_size=16, shuffle=True, num_workers=4, collate_fn=collate_fn_for_training)
+    val_dataloader = DataLoader(val_dataset, batch_size=32, shuffle=False, num_workers=4, collate_fn=collate_fn_for_training)
 
     criterion = LabelSmoothingCrossEntropy(weight = class_weights, smoothing = 0.1).to(device)
 
     best_acc = 0.0
-    for epoch in range(30):
+    for epoch in range(50):
         model.train()
         total_loss = 0
-        total_samples = 0
-        valid_samples = 0
-        for rois, labels, _ in tqdm(train_dataloader, desc=f"Epoch {epoch+1}"):
+        for rois, geo_features, labels in tqdm(train_dataloader, desc=f"Epoch {epoch+1}"):
             rois = rois.to(model.device)
+            geo_features = geo_features.to(device)
             labels = labels.to(model.device)
             optimizer.zero_grad()
-            features = model.action_backbone(rois)
-            cnn_features_flat = F.adaptive_avg_pool2d(features, 1).flatten(1)
-
+            cnn_features = model.action_backbone(rois)
+            cnn_features_flat = F.adaptive_avg_pool2d(cnn_features, 1).flatten(1)
+            
+            
+            combined_features = torch.cat([cnn_features_flat, geo_features], dim=1)
            
-            logits = model.action_head(features)
+            logits = model.action_head(combined_features)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()

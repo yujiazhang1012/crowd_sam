@@ -3,6 +3,7 @@ import json
 import os
 from pycocotools.coco import COCO
 from PIL import Image
+import numpy as np
 from .coco_names import coco_classes
 data_meta = {'crowdhuman': ["./datasets/crowdhuman", 7,
                    {1: 'write', 2: 'read', 3: 'lookup', 4: 'turn_head',
@@ -116,12 +117,55 @@ class CrowdHuman(torch.utils.data.Dataset):
     def __len__(self):
         return len(self.image_files)
     
-def collate_fn_crowdhuman(data):
-    rois, labels, geo_features = zip(*data)
-    rois = torch.stack(rois, dim=0)
-    labels = torch.tensor(labels, dtype=torch.long)
-    geo_features = torch.stack(geo_features, dim=0)
-    return rois, labels, geo_features
+# def collate_fn_crowdhuman(data):
+#     rois, labels, geo_features = zip(*data)
+#     rois = torch.stack(rois, dim=0)
+#     labels = torch.tensor(labels, dtype=torch.long)
+#     geo_features = torch.stack(geo_features, dim=0)
+#     return rois, labels, geo_features
+def collate_fn_crowdhuman(batch):
+    """
+    自定义collate函数, 处理包含bbox和image_shape的数据
+    预期每个batch item是字典格式: {'roi': ..., 'label': ..., 'bbox': ..., 'image_shape': ...}
+    """
+    # 检查数据格式
+    if isinstance(batch[0], dict):
+        # 处理字典格式数据
+        rois = torch.stack([item['roi'] for item in batch])
+        labels = torch.tensor([item['label'] for item in batch], dtype=torch.long)
+        
+        # 处理边界框 - 确保是float类型
+        bboxes = []
+        for item in batch:
+            bbox = item['bbox']
+            if isinstance(bbox, np.ndarray):
+                bbox = torch.from_numpy(bbox).float()
+            elif isinstance(bbox, list):
+                bbox = torch.tensor(bbox, dtype=torch.float)
+            bboxes.append(bbox)
+        bboxes = torch.stack(bboxes)
+        
+        # 处理图像尺寸 - 确保是int类型
+        image_shapes = []
+        for item in batch:
+            shape = item['image_shape']
+            if isinstance(shape, np.ndarray):
+                shape = torch.from_numpy(shape).int()
+            elif isinstance(shape, list) or isinstance(shape, tuple):
+                shape = torch.tensor(shape, dtype=torch.int)
+            image_shapes.append(shape)
+        image_shapes = torch.stack(image_shapes)
+        
+        return rois, labels, bboxes, image_shapes
+        
+    else:
+        # 向后兼容：处理旧格式 (rois, labels, geo_features)
+        rois, labels, geo_features = zip(*batch)
+        rois = torch.stack(rois, dim=0)
+        labels = torch.tensor(labels, dtype=torch.long)
+        geo_features = torch.stack(geo_features, dim=0)
+        return rois, labels, geo_features
+
 
 def collate_fn_coco(data):
     images = [d['image'] for d in  data]

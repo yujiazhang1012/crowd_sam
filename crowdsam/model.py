@@ -118,9 +118,9 @@ class CrowdSAM(nn.Module):
 
         # 分类头
         self.action_head = nn.Sequential(
-            nn.AdaptiveAvgPool2d((1, 1)),
-            nn.Flatten(),
-            nn.Linear(1280 , 256),
+            # nn.AdaptiveAvgPool2d((1, 1)),
+            # nn.Flatten(),
+            nn.Linear(1280 + 8, 256),
             nn.ReLU(),
             nn.Dropout(0.5),
             nn.Linear(256, self.num_action_classes)
@@ -213,71 +213,77 @@ class CrowdSAM(nn.Module):
         """
         x1, y1, x2, y2 = bbox
         h_img, w_img = image_shape[:2]
-        h_mask, w_mask = mask.shape[:2]
+        h_mask, w_mask = mask_np.shape[:2]
 
-        # 归一化高度
         height_norm = (y2 - y1) / h_img
 
-        # 手是否高于头部
-        ys, xs = np.where(mask)
-        if len(ys) == 0:
-            hand_above_head = 0.0
+        # 手高于头部 
+        mask_bool = mask_np.astype(bool)
+        ys, xs = np.where(mask_bool)
+        if len(ys) > 0:
+            upper_body_height = 0.4 * (y2 - y1)
+            upper_body_y_min = y1
+            upper_body_y_max = y1 + upper_body_height
+            hand_in_upper = (ys >= upper_body_y_min) & (ys <= upper_body_y_max)
+            hand_above_head = float(hand_in_upper.any())
         else:
-            # 在 mask 的尺度下判断
-            upper_body_y = (y1 + y2) // 2
-            hand_in_upper = ys < upper_body_y
-            if hand_in_upper.any():
-                hand_center_y = ys[hand_in_upper].min()
-                head_center_y = upper_body_y
-                hand_above_head = float(hand_center_y < head_center_y)
-            else:
-                hand_above_head = 0.0
+            hand_above_head = 0.0
 
         aspect_ratio = (x2 - x1) / (y2 - y1 + 1e-6)
 
-        mask_float = mask.astype(float)
-        weighted_y = (np.arange(mask.shape[0])[:, None] * mask_float).sum() / (mask_float.sum() + 1e-6)
+        mask_float = mask_np.astype(float)
+        weighted_y = (np.arange(mask_np.shape[0])[:, None] * mask_float).sum() / (mask_float.sum() + 1e-6)
         vertical_center_norm = weighted_y / h_img
 
         is_tall = float(height_norm > 0.3)
 
-        # 头部存在性判断
+        # 头部存在性 (改进版)
         head_region_height = 0.2 * (y2 - y1)
         head_y_min = y1
         head_y_max = y1 + head_region_height
-        head_pixels = mask[int(head_y_min):int(head_y_max), :].sum()
-        has_head = head_pixels > 10
+        head_pixels = mask_np[int(head_y_min):int(head_y_max), :].sum()
+        head_area_ratio = head_pixels / (mask_float.sum() + 1e-6)
+        has_head = head_area_ratio > 0.05
 
         if not has_head:
             return None
 
-        # 手部相对位置
+        # 手部相对位置 (简化，基于上半身判断)
         if len(ys) > 0:
             body_center_y = (y1 + y2) / 2
-            hand_relative_y = (hand_center_y - body_center_y) / (y2 - y1 + 1e-6) if 'hand_center_y' in locals() else 0.0
+            if hand_above_head:
+                # 如果手在上半身，计算其重心
+                hand_ys_in_upper = ys[hand_in_upper]
+                if len(hand_ys_in_upper) > 0:
+                    hand_center_y = hand_ys_in_upper.min()
+                    hand_relative_y = (hand_center_y - body_center_y) / (y2 - y1 + 1e-6)
+                else:
+                    hand_relative_y = 0.0
+            else:
+                hand_relative_y = 0.0
         else:
             hand_relative_y = 0.0
-        
-        # 头部朝向
-        head_mask = mask[int(head_y_min):int(head_y_max), :]
+
+        # 头部朝向 (简化)
+        head_mask = mask_np[int(head_y_min):int(head_y_max), :]
         if head_mask.sum() > 0:
             head_ys, head_xs = np.where(head_mask)
             if len(head_ys) > 0:
                 head_center_x = np.mean(head_xs)
                 head_width = head_xs.max() - head_xs.min()
                 head_aspect = head_width / (head_ys.max() - head_ys.min() + 1e-6)
-                head_orientation = float(head_center_x > w_mask / 2)  # 0: 左，1: 右
+                head_orientation = float(head_center_x > w_mask / 2)
             else:
                 head_orientation = 0.0
         else:
             head_orientation = 0.0
 
-        # 身体倾斜度
+        # 身体倾斜度 (简化，使用重心)
         if len(xs) > 0 and len(ys) > 0:
-            cov_matrix = np.cov(np.vstack([xs, ys]))
-            eigenvalues, eigenvectors = np.linalg.eig(cov_matrix)
-            major_axis_angle = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])
-            body_tilt = np.sin(major_axis_angle)
+            cx = (np.arange(mask_np.shape[1]) * mask_float.sum(axis=0)).sum() / (mask_float.sum() + 1e-6)
+            cy = (np.arange(mask_np.shape[0]) * mask_float.sum(axis=1)).sum() / (mask_float.sum() + 1e-6)
+            body_center_y = (y1 + y2) / 2
+            body_tilt = (cy - body_center_y) / (y2 - y1 + 1e-6)
         else:
             body_tilt = 0.0
 
@@ -287,9 +293,9 @@ class CrowdSAM(nn.Module):
             aspect_ratio,
             vertical_center_norm,
             is_tall,
-            hand_relative_y,  
-            head_orientation, 
-            body_tilt 
+            hand_relative_y,
+            ead_orientation,
+            body_tilt
         ], dtype=np.float32)
 
         return geo_feat
@@ -376,8 +382,8 @@ class CrowdSAM(nn.Module):
             print(f"🔍 CNN features shape: {cnn_features_flat.shape}")  # 应该是 (1, 1280)
             print(f"🔍 Geo features shape: {geo_features_tensor.shape}") 
             combined_features = torch.cat([cnn_features_flat, geo_features_tensor], dim=1)
-            print(f"🔍 Combined features shape: {cnn_features.shape}")
-            logits = self.action_head(cnn_features)
+            print(f"🔍 Combined features shape: {combined_features.shape}")
+            logits = self.action_head(combined_features)
             # 添加 Temperature Scaling
             # temperature = 1.5
             probs = F.softmax(logits, dim=-1)
